@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .config import Config
 from .context import discover
 from .llm import LLMProvider
+from .presentation import TerminalUI
 from .redact import redact
 from .safety import Rejected, approve, classify
 from .storage import Storage
@@ -46,7 +47,15 @@ def _parse_response(message: object) -> tuple[str, object]:
                 args = json.loads(fn["arguments"])
             except json.JSONDecodeError:
                 raise Rejected("Malformed tool JSON") from None
-            parsed.append((call["id"], fn["name"], validate(fn["name"], args)))
+            try:
+                args = validate(fn["name"], args)
+                error = None
+            except Rejected as exc:
+                error = str(exc)
+            parsed.append((call["id"], fn["name"], args, error))
+        if any(error for _, _, _, error in parsed):
+            parsed = [(call_id, name, args, error or "Another tool call in this batch is invalid; retry the batch")
+                      for call_id, name, args, error in parsed]
         return "tools", parsed
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
@@ -55,9 +64,10 @@ def _parse_response(message: object) -> tuple[str, object]:
 
 
 class Agent:
-    def __init__(self, provider: LLMProvider, config: Config, storage: Storage, *, dry_run: bool = False, interactive: bool = True, debug: bool = False):
+    def __init__(self, provider: LLMProvider, config: Config, storage: Storage, *, dry_run: bool = False, interactive: bool = True, debug: bool = False, ui: TerminalUI | None = None):
         self.provider, self.config, self.storage = provider, config, storage
         self.dry_run, self.interactive, self.debug = dry_run, interactive, debug
+        self.ui = ui
         self.history: list[dict] = []
 
     def ask(self, request: str) -> AgentResult:
@@ -92,8 +102,15 @@ class Agent:
                 calls = payload
                 messages.append({"role": "assistant", "content": None, "tool_calls": [
                     {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
-                    for call_id, name, args in calls]})
-                for call_id, name, args in calls:
+                    for call_id, name, args, _ in calls]})
+                for call_id, name, args, error in calls:
+                    if self.ui:
+                        self.ui.progress(name, args if isinstance(args, dict) else {})
+                    if error:
+                        safe_result = redact(json.dumps({"rejected": True, "error": error}, ensure_ascii=False))
+                        self.storage.call(run_id, name, json.dumps(args, ensure_ascii=False), safe_result)
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": safe_result})
+                        continue
                     try:
                         decision = classify(name, args)
                     except Rejected as exc:
@@ -105,19 +122,25 @@ class Agent:
                         continue
                     if self.debug:
                         print(f"[debug] tool={name} risk={decision.level} target={redact(decision.target)}")
-                    elif decision.level == 0:
+                    elif decision.level == 0 and self.ui is None:
                         print(f"- Проверяю: {name}")
                     if self.dry_run and decision.level > 0:
                         proposed.append(f"• {decision.description}: {redact(decision.target)}")
                         result = {"dry_run": True, "message": "Change was planned but not executed"}
-                    elif not approve(decision, dry_run=False, interactive=self.interactive):
+                    elif not self._approve(decision):
                         result = {"denied": True, "message": "Interactive approval was not granted"}
                         blocked = True
                     else:
                         if decision.level > 0:
                             if name == "create_tool":
-                                print(f"Код нового инструмента {args['name']}:\n{redact(args['source'])}")
-                            print(f"- {decision.description}: {redact(decision.target)}")
+                                if self.ui:
+                                    self.ui.code(args["name"], args["source"])
+                                else:
+                                    print(f"Код нового инструмента {args['name']}:\n{redact(args['source'])}")
+                            if self.ui:
+                                self.ui.resume()
+                            else:
+                                print(f"- {decision.description}: {redact(decision.target)}")
                         try:
                             if decision.level > 0:
                                 with resource_lock("global-mutation"):
@@ -159,3 +182,11 @@ class Agent:
             message = redact(str(exc))
             self.storage.finish(run_id, "failed", message)
             return AgentResult(run_id, "failed", message)
+
+    def _approve(self, decision) -> bool:
+        if self.ui and decision.level >= 3:
+            self.ui.pause()
+        allowed = approve(decision, dry_run=False, interactive=self.interactive)
+        if self.ui and allowed:
+            self.ui.resume()
+        return allowed

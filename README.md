@@ -2,6 +2,8 @@
 
 SysAI is a local terminal agent for Debian, Ubuntu and Armbian administration over SSH. It uses DeepSeek tool calling, a guarded tool registry, live diagnostics, and backend verification.
 
+Interactive answers use a compact live progress line and formatted Markdown panels for headings, lists, code and tables. Redirected output remains plain text without terminal control codes. Set `NO_COLOR=1` if you prefer a monochrome terminal.
+
 ## Supported systems and installation
 
 Python 3.10+, systemd and apt are expected for full functionality. The code is architecture independent and targets amd64, arm64 and armhf. Install directly from this repository:

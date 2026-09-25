@@ -79,7 +79,11 @@ def validate(name: str, args: object) -> dict:
     spec = SPECS[name]
     if set(args) - set(spec) or any(required and key not in args for key, (_, required) in spec.items()):
         raise Rejected("Unknown or missing tool argument")
+    args = dict(args)
     for key, value in args.items():
+        if spec[key][0] is bool and isinstance(value, str) and value.lower() in {"true", "false"}:
+            args[key] = value.lower() == "true"
+            continue
         if type(value) is not spec[key][0]:
             raise Rejected(f"Invalid argument type: {key}")
     return args

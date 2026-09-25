@@ -15,6 +15,7 @@ from sysai.cli import setup_wizard
 from sysai.context import discover
 from sysai.disks import preflight
 from sysai.llm import MockLLMProvider, DeepSeekProvider, LLMError
+from sysai.presentation import Console, TerminalUI, safe_terminal_text
 from sysai.redact import redact
 from sysai.runner import run
 from sysai.safety import Rejected, approve, classify, parse_command, protected_path, secret_path
@@ -75,8 +76,9 @@ class CoreTests(unittest.TestCase):
             validate("missing", {})
         with self.assertRaises(Rejected):
             _parse_response({"tool_calls": [{"type": "function", "function": {"name": "shell_exec", "arguments": "{"}}]})
-        with self.assertRaises(Rejected):
-            _parse_response({"tool_calls": [{"type": "function", "function": {"name": "shell_exec", "arguments": '{"command":"df","extra":1}'}}]})
+        self.assertIn("Unknown or missing", _parse_response({"tool_calls": [{"id": "bad", "type": "function", "function": {"name": "shell_exec", "arguments": '{"command":"df","extra":1}'}}]})[1][0][3])
+        self.assertEqual(validate("shell_exec", {"command": "df", "shell": "false"})["shell"], False)
+        self.assertEqual(validate("shell_exec", {"command": "df", "shell": "TRUE"})["shell"], True)
 
     def test_deepseek_parser_rejects_truncated_response(self):
         class Response:
@@ -216,10 +218,10 @@ class CoreTests(unittest.TestCase):
     def test_invalid_batch_is_rejected_before_any_tool_runs(self):
         calls = [{"id": "first", "type": "function", "function": {"name": "system_info", "arguments": "{}"}},
                  {"id": "second", "type": "function", "function": {"name": "missing", "arguments": "{}"}}]
-        agent = Agent(MockLLMProvider([{"tool_calls": calls}]), Config(), self.db, interactive=False)
+        agent = Agent(MockLLMProvider([{"tool_calls": calls}, {"content": "Исправлю параметры."}]), Config(), self.db, interactive=False)
         with patch("sysai.agent.execute") as executor:
             result = agent.ask("Проверь систему")
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "success")
         executor.assert_not_called()
 
     def test_rejected_shell_syntax_is_returned_for_model_retry(self):
@@ -239,6 +241,36 @@ class CoreTests(unittest.TestCase):
         replies = [item for item in provider.last_messages if item["role"] == "tool"]
         self.assertIn("Set shell=true", replies[0]["content"])
         self.assertEqual([item["tool_call_id"] for item in replies], ["bad", "good"])
+
+    def test_string_boolean_tool_argument_does_not_abort_request(self):
+        call = {"id": "check", "type": "function", "function": {"name": "shell_exec", "arguments": '{"command":"df -h","shell":"false"}'}}
+        agent = Agent(MockLLMProvider([{"tool_calls": [call]}, {"content": "Диск проверен."}]), Config(), self.db, interactive=False)
+        with patch("sysai.agent.execute", return_value={"exit_code": 0, "stdout": "ok"}) as executor:
+            result = agent.ask("Проверь диск")
+        self.assertEqual(result.status, "success")
+        self.assertIs(executor.call_args.args[1]["shell"], False)
+
+    def test_plain_output_has_no_terminal_escapes(self):
+        output = io.StringIO()
+        ui = TerminalUI()
+        ui.interactive = False
+        with redirect_stdout(output):
+            ui.result("run_test", "success", "## Система\n\n- **SSH:** работает")
+        self.assertIn("## Система", output.getvalue())
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertEqual(safe_terminal_text("ok\x1b[31mred\x1b[0m"), "okred")
+
+    @unittest.skipIf(Console is None, "Rich is not installed in this test interpreter")
+    def test_interactive_output_renders_markdown_panel(self):
+        output = io.StringIO()
+        ui = TerminalUI()
+        ui.console = Console(file=output, force_terminal=True, color_system=None, width=72)
+        ui.interactive = True
+        ui.result("run_test", "success", "## Система\n\n- **SSH:** работает")
+        rendered = output.getvalue()
+        self.assertTrue("┌" in rendered or "╭" in rendered)
+        self.assertIn("SSH", rendered)
+        self.assertNotIn("**SSH**", rendered)
 
     def test_tool_execution_rejection_is_returned_for_model_retry(self):
         calls = [{"id": "bad", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"/missing"}'}}]

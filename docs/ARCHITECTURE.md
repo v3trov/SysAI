@@ -8,6 +8,6 @@ Risk 0 runs automatically. Risk 1 and 2 are announced and run automatically. Ris
 
 SQLite stores run, call, task, task-run, and backup metadata; it is never considered authoritative for live system state. Systemd timers start separate `sysai task-run` processes. Static tasks run a model-composed, validated sequence of registered tools. AI tasks use the same controller and safety checks as interactive work.
 
-No process runs persistently. The project uses Python's standard library to keep installation small on amd64, arm64 and armhf Debian-family systems.
+No process runs persistently. The core uses Python's standard library, while Rich formats interactive terminal output on amd64, arm64 and armhf Debian-family systems.
 
 Model-authored tools are stored as versioned Python source plus a manifest under the state directory. The source defines `run(args)` and the manifest supplies a JSON parameter schema. The controller exposes new schemas on the next model step without restarting, validates arguments, checks the source hash, and runs each tool in a timed child process. Registration and invocation run automatically. Source is shown when registered. A child process provides failure and timeout separation but does not limit what root code can access.

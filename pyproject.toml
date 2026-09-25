@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sysai-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local Linux administration agent with a guarded tool layer"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["rich>=13.9"]
 
 [project.scripts]
 sysai = "sysai.cli:main"

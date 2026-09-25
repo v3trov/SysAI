@@ -13,18 +13,24 @@ from .agent import Agent
 from .config import Config, config_dir, save_key, state_dir
 from .context import discover, dynamic_summary
 from .llm import DeepSeekProvider, LLMError
+from .presentation import TerminalUI
 from .scheduler import task_run
 from .storage import Storage
 
 
-def _agent(config: Config, db: Storage, args, *, interactive: bool = True) -> Agent:
-    return Agent(DeepSeekProvider(config), config, db, dry_run=args.dry_run, interactive=interactive, debug=args.debug)
+def _agent(config: Config, db: Storage, args, *, interactive: bool = True, ui: TerminalUI | None = None) -> Agent:
+    return Agent(DeepSeekProvider(config), config, db, dry_run=args.dry_run, interactive=interactive, debug=args.debug, ui=ui)
 
 
 def _ask(agent: Agent, question: str) -> int:
-    result = agent.ask(question)
-    print(result.message)
-    print(f"[{result.run_id}: {result.status}]")
+    if agent.ui:
+        with agent.ui.activity():
+            result = agent.ask(question)
+        agent.ui.result(result.run_id, result.status, result.message)
+    else:
+        result = agent.ask(question)
+        print(result.message)
+        print(f"[{result.run_id}: {result.status}]")
     return 0 if result.status in {"success", "planned"} else 1
 
 
@@ -158,7 +164,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     config = Config.load()
     db = Storage()
-    agent = _agent(config, db, args, interactive=command != "task-run")
+    management_commands = {"history", "tasks", "task", "task-run"}
+    ui = None if command in management_commands else TerminalUI(debug=args.debug)
+    agent = _agent(config, db, args, interactive=command != "task-run", ui=ui)
     if command == "history":
         for row in db.db.execute("SELECT id,started,status,request FROM runs ORDER BY started DESC LIMIT 30"):
             print(f"{row['id']} {row['started']} {row['status']} {row['request']}")
@@ -179,10 +187,10 @@ def main(argv: list[str] | None = None) -> int:
     if parts:
         return _ask(agent, " ".join(parts))
     info = discover()
-    print(f"SysAI {__version__}\nHost: {info['hostname']}\nOS: {info['os']['name']}\nKernel: {info['kernel']}\nArch: {info['architecture']}")
+    ui.banner(__version__, info)
     while True:
         try:
-            question = input("sysai> ").strip()
+            question = ui.prompt().strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
