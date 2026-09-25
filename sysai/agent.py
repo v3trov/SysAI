@@ -137,9 +137,7 @@ class Agent:
                                     self.ui.code(args["name"], args["source"])
                                 else:
                                     print(f"Код нового инструмента {args['name']}:\n{redact(args['source'])}")
-                            if self.ui:
-                                self.ui.resume()
-                            else:
+                            if self.ui is None:
                                 print(f"- {decision.description}: {redact(decision.target)}")
                         try:
                             if decision.level > 0:
@@ -184,9 +182,4 @@ class Agent:
             return AgentResult(run_id, "failed", message)
 
     def _approve(self, decision) -> bool:
-        if self.ui and decision.level >= 3:
-            self.ui.pause()
-        allowed = approve(decision, dry_run=False, interactive=self.interactive)
-        if self.ui and allowed:
-            self.ui.resume()
-        return allowed
+        return approve(decision, dry_run=False, interactive=self.interactive)

@@ -41,7 +41,6 @@ class TerminalUI:
         self.debug = debug
         self.console = Console(highlight=False) if Console is not None else None
         self.interactive = bool(self.console and self.console.is_terminal and sys.stdout.isatty())
-        self._status = None
         self._steps = 0
 
     def banner(self, version: str, info: dict) -> None:
@@ -57,44 +56,25 @@ class TerminalUI:
         self.console.print()
 
     def prompt(self) -> str:
-        if self.interactive:
-            return self.console.input("[bold cyan]sysai[/] [dim]›[/] ")
+        # Keep readline and echo on the terminal's native input path. Live
+        # rendering and styled prompts can displace the cursor over SSH.
         return input("sysai> ")
-
-    def _start(self) -> None:
-        if self.interactive and not self.debug and self._status is None:
-            self._status = self.console.status("Анализирую запрос…", spinner="dots", spinner_style="cyan")
-            self._status.start()
-
-    def pause(self) -> None:
-        if self._status is not None:
-            self._status.stop()
-            self._status = None
-
-    def resume(self) -> None:
-        self._start()
 
     @contextmanager
     def activity(self):
         self._steps = 0
-        self._start()
-        try:
-            yield
-        finally:
-            self.pause()
+        if self.interactive and not self.debug:
+            self.console.print(Text("Анализирую запрос…", style="dim"))
+        yield
 
     def progress(self, name: str, args: dict) -> None:
         self._steps += 1
         if not self.interactive or self.debug:
             return
         label = LABELS.get(name, name.replace("_", " "))
-        target = args.get("action") or args.get("path") or args.get("command") or args.get("name") or ""
-        target = safe_terminal_text(redact(str(target))).replace("\n", " ")[:64]
-        self._start()
-        self._status.update(Text(f"Шаг {self._steps}  ·  {label}" + (f"  ·  {target}" if target else "")))
+        self.console.print(Text(f"  {self._steps}. {label}", style="dim"))
 
     def code(self, name: str, source: str) -> None:
-        self.pause()
         if self.interactive:
             self.console.print(Panel(Syntax(safe_terminal_text(redact(source)), "python", line_numbers=True, word_wrap=True),
                                      title=f"Код инструмента: {name}", border_style="yellow"))
@@ -102,7 +82,6 @@ class TerminalUI:
             print(f"Код нового инструмента {name}:\n{safe_terminal_text(redact(source))}")
 
     def result(self, run_id: str, status: str, message: str) -> None:
-        self.pause()
         message = safe_terminal_text(message)
         titles = {"success": ("Ответ", "cyan"), "planned": ("План", "yellow"),
                   "incomplete": ("Требует проверки", "yellow"), "failed": ("Ошибка", "red")}

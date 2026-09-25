@@ -272,6 +272,25 @@ class CoreTests(unittest.TestCase):
         self.assertIn("SSH", rendered)
         self.assertNotIn("**SSH**", rendered)
 
+    @unittest.skipIf(Console is None, "Rich is not installed in this test interpreter")
+    def test_progress_does_not_move_cursor_and_prompt_uses_native_input(self):
+        output = io.StringIO()
+        ui = TerminalUI()
+        ui.console = Console(file=output, force_terminal=True, color_system=None, width=72)
+        ui.interactive = True
+        with ui.activity():
+            ui.progress("system_info", {})
+            ui.progress("shell_exec", {"command": "df -h"})
+        ui.result("run_test", "success", "Проверка завершена.")
+        with patch("builtins.input", return_value="следующая команда") as native_input:
+            self.assertEqual(ui.prompt(), "следующая команда")
+        native_input.assert_called_once_with("sysai> ")
+        rendered = output.getvalue()
+        self.assertIn("1. Система", rendered)
+        self.assertIn("2. Команда", rendered)
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x1b[", rendered)
+
     def test_tool_execution_rejection_is_returned_for_model_retry(self):
         calls = [{"id": "bad", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"/missing"}'}}]
         agent = Agent(MockLLMProvider([{"tool_calls": calls}, {"content": "Файл недоступен."}]), Config(), self.db, interactive=False)
