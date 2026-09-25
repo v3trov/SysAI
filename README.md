@@ -10,7 +10,7 @@ Python 3.10+, systemd and apt are expected for full functionality. The code is a
 curl -fsSL https://raw.githubusercontent.com/v3trov/SysAI/main/install.sh | sudo sh
 ```
 
-The installer shows five steps: system check, dependencies, source download, isolated installation, and private API setup. It downloads the repository archive over HTTPS, creates `/opt/sysai/venv` without modifying system Python, and places the command in `/usr/local/bin`. To inspect the script before running it:
+The installer shows five steps: system check, dependencies, source download, isolated installation, and private API setup. It downloads the repository archive over HTTPS, creates `/opt/sysai/venv` without modifying system Python, and places the command in `/usr/local/bin`. The setup wizard uses the terminal directly even when the installer is piped through `sh`. If installation completed but API setup was interrupted, run `sudo sysai setup`; there is no need to reinstall. To inspect the script before running it:
 
 ```bash
 curl -fsSLo sysai-install.sh https://raw.githubusercontent.com/v3trov/SysAI/main/install.sh

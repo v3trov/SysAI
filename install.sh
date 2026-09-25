@@ -76,7 +76,16 @@ else
     [ -n "$reply" ] || reply=y
 fi
 case "$reply" in
-    y|Y|yes|YES) /opt/sysai/venv/bin/sysai setup || printf 'API setup did not finish. Run later: sudo sysai setup\n' ;;
+    y|Y|yes|YES)
+        # The installer may itself be read from stdin (curl | sudo sh).
+        # Give the interactive wizard the terminal for all three streams.
+        if [ -r /dev/tty ]; then
+            PYTHONUNBUFFERED=1 /opt/sysai/venv/bin/sysai setup < /dev/tty > /dev/tty 2>&1 ||
+                printf 'API setup did not finish. Run later: sudo sysai setup\n'
+        else
+            printf 'No interactive terminal. Run later: sudo sysai setup\n'
+        fi
+        ;;
     *) printf 'Setup skipped. Run later: sudo sysai setup\n' ;;
 esac
 printf '\nSysAI installed. Start with: sysai\n'

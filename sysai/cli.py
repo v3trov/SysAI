@@ -36,10 +36,10 @@ def _task_ai(agent: Agent, request: str) -> dict:
 def _tty_prompt(message: str) -> str:
     if os.name == "nt":
         return input(message)
-    with open("/dev/tty", "r+") as terminal:
-        terminal.write(message)
-        terminal.flush()
-        return terminal.readline().strip()
+    with open("/dev/tty", "w") as terminal_out, open("/dev/tty", "r") as terminal_in:
+        terminal_out.write(message)
+        terminal_out.flush()
+        return terminal_in.readline().strip()
 
 
 def setup_wizard() -> int:
