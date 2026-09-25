@@ -94,7 +94,15 @@ class Agent:
                     {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
                     for call_id, name, args in calls]})
                 for call_id, name, args in calls:
-                    decision = classify(name, args)
+                    try:
+                        decision = classify(name, args)
+                    except Rejected as exc:
+                        # A rejected request is a tool result, so the model can
+                        # correct its arguments without aborting the whole turn.
+                        safe_result = redact(json.dumps({"rejected": True, "error": str(exc)}, ensure_ascii=False))
+                        self.storage.call(run_id, name, json.dumps(args, ensure_ascii=False), safe_result)
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": safe_result})
+                        continue
                     if self.debug:
                         print(f"[debug] tool={name} risk={decision.level} target={redact(decision.target)}")
                     elif decision.level == 0:
@@ -108,12 +116,15 @@ class Agent:
                     else:
                         if decision.level > 0:
                             print(f"- {decision.description}: {redact(decision.target)}")
-                        if decision.level > 0:
-                            with resource_lock("global-mutation"):
+                        try:
+                            if decision.level > 0:
+                                with resource_lock("global-mutation"):
+                                    result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
+                            else:
                                 result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
-                        else:
-                            result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
-                        if decision.level > 0 and result.get("success", result.get("exit_code", 0) == 0):
+                        except Rejected as exc:
+                            result = {"rejected": True, "error": str(exc)}
+                        if not result.get("rejected") and decision.level > 0 and result.get("success", result.get("exit_code", 0) == 0):
                             if name == "shell_exec":
                                 pending_verification = True
                                 pending_generic = True
@@ -122,10 +133,10 @@ class Agent:
                                 result["verification"] = check
                                 pending_verification = not check["verified"]
                                 pending_generic = False
-                        elif decision.level > 0:
+                        elif not result.get("rejected") and decision.level > 0:
                             pending_verification = True
                             pending_generic = False
-                        elif decision.level == 0 and result.get("exit_code", 0) == 0 and pending_generic:
+                        elif not result.get("rejected") and decision.level == 0 and result.get("exit_code", 0) == 0 and pending_generic:
                             pending_verification = False
                             pending_generic = False
                     safe_result = redact(json.dumps(result, ensure_ascii=False))[:35000]

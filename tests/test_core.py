@@ -213,6 +213,32 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         executor.assert_not_called()
 
+    def test_rejected_shell_syntax_is_returned_for_model_retry(self):
+        class RecordingProvider(MockLLMProvider):
+            def complete(self, messages, tools):
+                self.last_messages = list(messages)
+                return super().complete(messages, tools)
+
+        bad = {"id": "bad", "type": "function", "function": {"name": "shell_exec", "arguments": '{"command":"df -h | tail -1"}'}}
+        good = {"id": "good", "type": "function", "function": {"name": "shell_exec", "arguments": '{"command":"df -h"}'}}
+        provider = RecordingProvider([{"tool_calls": [bad]}, {"tool_calls": [good]}, {"content": "Исправил вызов."}])
+        agent = Agent(provider, Config(), self.db, interactive=False)
+        with patch("sysai.agent.execute", return_value={"exit_code": 0, "stdout": "ok"}) as executor:
+            result = agent.ask("Проверь диск")
+        self.assertEqual(result.status, "success")
+        executor.assert_called_once()
+        replies = [item for item in provider.last_messages if item["role"] == "tool"]
+        self.assertIn("Set shell=true", replies[0]["content"])
+        self.assertEqual([item["tool_call_id"] for item in replies], ["bad", "good"])
+
+    def test_tool_execution_rejection_is_returned_for_model_retry(self):
+        calls = [{"id": "bad", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"/missing"}'}}]
+        agent = Agent(MockLLMProvider([{"tool_calls": calls}, {"content": "Файл недоступен."}]), Config(), self.db, interactive=False)
+        with patch("sysai.agent.execute", side_effect=Rejected("File unavailable")):
+            result = agent.ask("Прочитай файл")
+        self.assertEqual(result.status, "success")
+        self.assertIn("Файл недоступен", result.message)
+
     def test_dry_run_does_not_mutate(self):
         file = Path(self.temp.name) / "planned.txt"
         replies = [
