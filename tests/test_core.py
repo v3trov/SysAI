@@ -185,6 +185,34 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result.status, "success", result.message)
         self.assertIn("проверена", result.message)
 
+    def test_agent_handles_multiple_tool_calls_in_one_reply(self):
+        class RecordingProvider(MockLLMProvider):
+            def complete(self, messages, tools):
+                self.last_messages = list(messages)
+                return super().complete(messages, tools)
+
+        calls = [{"id": "first", "type": "function", "function": {"name": "system_info", "arguments": "{}"}},
+                 {"id": "second", "type": "function", "function": {"name": "system_info", "arguments": '{"dynamic":true}'}}]
+        provider = RecordingProvider([{"content": None, "tool_calls": calls}, {"content": "Проверка завершена."}])
+        agent = Agent(provider, Config(), self.db, interactive=False)
+        with patch("sysai.agent.execute", return_value={"exit_code": 0, "stdout": "ok"}) as executor:
+            result = agent.ask("Проверь систему")
+        self.assertEqual(result.status, "success")
+        self.assertEqual(executor.call_count, 2)
+        assistant = next(item for item in provider.last_messages if item["role"] == "assistant" and "tool_calls" in item)
+        replies = [item for item in provider.last_messages if item["role"] == "tool"]
+        self.assertEqual([call["id"] for call in assistant["tool_calls"]], ["first", "second"])
+        self.assertEqual([reply["tool_call_id"] for reply in replies], ["first", "second"])
+
+    def test_invalid_batch_is_rejected_before_any_tool_runs(self):
+        calls = [{"id": "first", "type": "function", "function": {"name": "system_info", "arguments": "{}"}},
+                 {"id": "second", "type": "function", "function": {"name": "missing", "arguments": "{}"}}]
+        agent = Agent(MockLLMProvider([{"tool_calls": calls}]), Config(), self.db, interactive=False)
+        with patch("sysai.agent.execute") as executor:
+            result = agent.ask("Проверь систему")
+        self.assertEqual(result.status, "failed")
+        executor.assert_not_called()
+
     def test_dry_run_does_not_mutate(self):
         file = Path(self.temp.name) / "planned.txt"
         replies = [

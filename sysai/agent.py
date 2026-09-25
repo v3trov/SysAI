@@ -28,20 +28,26 @@ def _parse_response(message: object) -> tuple[str, object]:
     if not isinstance(message, dict):
         raise Rejected("Malformed model message")
     calls = message.get("tool_calls")
-    if calls:
-        if not isinstance(calls, list) or len(calls) != 1:
-            raise Rejected("Exactly one tool call is required")
-        call = calls[0]
-        if not isinstance(call, dict) or call.get("type") != "function" or not isinstance(call.get("function"), dict):
-            raise Rejected("Malformed tool call")
-        fn = call["function"]
-        if not isinstance(fn.get("name"), str) or not isinstance(fn.get("arguments"), str):
-            raise Rejected("Malformed tool arguments")
-        try:
-            args = json.loads(fn["arguments"])
-        except json.JSONDecodeError:
-            raise Rejected("Malformed tool JSON") from None
-        return "tool", (str(call.get("id", "call_1")), fn["name"], validate(fn["name"], args))
+    if calls is not None and calls != []:
+        if not isinstance(calls, list) or not 1 <= len(calls) <= 16:
+            raise Rejected("Invalid number of tool calls")
+        parsed = []
+        seen_ids = set()
+        for call in calls:
+            if not isinstance(call, dict) or call.get("type") != "function" or not isinstance(call.get("function"), dict):
+                raise Rejected("Malformed tool call")
+            fn = call["function"]
+            if not isinstance(call.get("id"), str) or not call["id"] or call["id"] in seen_ids:
+                raise Rejected("Missing or duplicate tool call ID")
+            seen_ids.add(call["id"])
+            if not isinstance(fn.get("name"), str) or not isinstance(fn.get("arguments"), str):
+                raise Rejected("Malformed tool arguments")
+            try:
+                args = json.loads(fn["arguments"])
+            except json.JSONDecodeError:
+                raise Rejected("Malformed tool JSON") from None
+            parsed.append((call["id"], fn["name"], validate(fn["name"], args)))
+        return "tools", parsed
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         raise Rejected("Empty model response")
@@ -83,50 +89,53 @@ class Agent:
                     self.storage.finish(run_id, status, answer)
                     self.history.extend([{"role": "user", "content": redact(request)}, {"role": "assistant", "content": answer}])
                     return AgentResult(run_id, status, answer)
-                call_id, name, args = payload
-                decision = classify(name, args)
-                if self.debug:
-                    print(f"[debug] tool={name} risk={decision.level} target={redact(decision.target)}")
-                elif decision.level == 0:
-                    print(f"- Проверяю: {name}")
-                messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]})
-                if self.dry_run and decision.level > 0:
-                    proposed.append(f"• {decision.description}: {redact(decision.target)}")
-                    result = {"dry_run": True, "message": "Change was planned but not executed"}
-                elif not approve(decision, dry_run=False, interactive=self.interactive):
-                    result = {"denied": True, "message": "Interactive approval was not granted"}
-                    blocked = True
-                else:
-                    if decision.level > 0:
-                        print(f"- {decision.description}: {redact(decision.target)}")
-                    if decision.level > 0:
-                        with resource_lock("global-mutation"):
-                            result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
+                calls = payload
+                messages.append({"role": "assistant", "content": None, "tool_calls": [
+                    {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+                    for call_id, name, args in calls]})
+                for call_id, name, args in calls:
+                    decision = classify(name, args)
+                    if self.debug:
+                        print(f"[debug] tool={name} risk={decision.level} target={redact(decision.target)}")
+                    elif decision.level == 0:
+                        print(f"- Проверяю: {name}")
+                    if self.dry_run and decision.level > 0:
+                        proposed.append(f"• {decision.description}: {redact(decision.target)}")
+                        result = {"dry_run": True, "message": "Change was planned but not executed"}
+                    elif not approve(decision, dry_run=False, interactive=self.interactive):
+                        result = {"denied": True, "message": "Interactive approval was not granted"}
+                        blocked = True
                     else:
-                        result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
-                    if decision.level > 0 and result.get("success", result.get("exit_code", 0) == 0):
-                        if name == "shell_exec":
-                            pending_verification = True
-                            pending_generic = True
+                        if decision.level > 0:
+                            print(f"- {decision.description}: {redact(decision.target)}")
+                        if decision.level > 0:
+                            with resource_lock("global-mutation"):
+                                result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
                         else:
-                            check = verify(name, args)
-                            result["verification"] = check
-                            pending_verification = not check["verified"]
+                            result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
+                        if decision.level > 0 and result.get("success", result.get("exit_code", 0) == 0):
+                            if name == "shell_exec":
+                                pending_verification = True
+                                pending_generic = True
+                            else:
+                                check = verify(name, args)
+                                result["verification"] = check
+                                pending_verification = not check["verified"]
+                                pending_generic = False
+                        elif decision.level > 0:
+                            pending_verification = True
                             pending_generic = False
-                    elif decision.level > 0:
-                        pending_verification = True
-                        pending_generic = False
-                    elif decision.level == 0 and result.get("exit_code", 0) == 0 and pending_generic:
-                        pending_verification = False
-                        pending_generic = False
-                safe_result = redact(json.dumps(result, ensure_ascii=False))[:35000]
-                if self.debug:
-                    summary = {key: result.get(key) for key in ("exit_code", "duration_ms", "truncated", "success", "denied", "dry_run") if key in result}
-                    if "verification" in result:
-                        summary["verified"] = result["verification"].get("verified")
-                    print(f"[debug] result={summary}")
-                self.storage.call(run_id, name, json.dumps(args, ensure_ascii=False), safe_result)
-                messages.append({"role": "tool", "tool_call_id": call_id, "content": safe_result})
+                        elif decision.level == 0 and result.get("exit_code", 0) == 0 and pending_generic:
+                            pending_verification = False
+                            pending_generic = False
+                    safe_result = redact(json.dumps(result, ensure_ascii=False))[:35000]
+                    if self.debug:
+                        summary = {key: result.get(key) for key in ("exit_code", "duration_ms", "truncated", "success", "denied", "dry_run") if key in result}
+                        if "verification" in result:
+                            summary["verified"] = result["verification"].get("verified")
+                        print(f"[debug] result={summary}")
+                    self.storage.call(run_id, name, json.dumps(args, ensure_ascii=False), safe_result)
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": safe_result})
             raise RuntimeError("Iteration limit reached")
         except KeyboardInterrupt:
             self.storage.finish(run_id, "interrupted", "Interrupted by user")
