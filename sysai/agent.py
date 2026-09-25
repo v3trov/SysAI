@@ -10,7 +10,7 @@ from .llm import LLMProvider
 from .redact import redact
 from .safety import Rejected, approve, classify
 from .storage import Storage
-from .tools import execute, resource_lock, schemas, validate
+from .tools import SPECS, execute, resource_lock, schemas, validate
 from .verify import verify
 
 
@@ -115,6 +115,8 @@ class Agent:
                         blocked = True
                     else:
                         if decision.level > 0:
+                            if name == "create_tool":
+                                print(f"Код нового инструмента {args['name']}:\n{redact(args['source'])}")
                             print(f"- {decision.description}: {redact(decision.target)}")
                         try:
                             if decision.level > 0:
@@ -124,8 +126,10 @@ class Agent:
                                 result = execute(name, args, self.storage, run_id, timeout=self.config.tool_timeout)
                         except Rejected as exc:
                             result = {"rejected": True, "error": str(exc)}
+                        except OSError as exc:
+                            result = {"exit_code": None, "error": str(exc), "effect_unknown": decision.level > 0}
                         if not result.get("rejected") and decision.level > 0 and result.get("success", result.get("exit_code", 0) == 0):
-                            if name == "shell_exec":
+                            if name == "shell_exec" or name not in SPECS:
                                 pending_verification = True
                                 pending_generic = True
                             else:

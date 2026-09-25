@@ -76,8 +76,8 @@ def validate_plan(payload: str) -> dict:
             raise ValueError("Invalid scheduled step")
         validate(step["tool"], step["arguments"])
         level = classify(step["tool"], step["arguments"]).level
-        if level > 1:
-            raise ValueError("High-risk actions cannot run unattended")
+        if level >= 3:
+            raise ValueError("Deletion and formatting cannot run unattended")
         if pending_shell and level > 0:
             raise ValueError("Mutating shell step needs a read-only verification step")
         pending_shell = step["tool"] == "shell_exec" and level > 0

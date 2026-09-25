@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .config import state_dir
 from .context import discover, dynamic_summary
+from . import custom_tools
 from .runner import run
 from .safety import Rejected, parse_command, secret_path
 from .storage import Storage
@@ -31,6 +32,8 @@ SPECS: dict[str, dict[str, tuple[type, bool]]] = {
     "schedule_task": {"description": (str, True), "schedule": (str, True), "kind": (str, True), "payload": (str, True)},
     "provision_disk": {"device": (str, True), "expected_size_gb": (int, True), "target": (str, True)},
     "archive_create": {"source": (str, True), "destination": (str, True)},
+    "create_tool": {"name": (str, True), "description": (str, True), "parameters": (str, True), "source": (str, True), "replace": (bool, False)},
+    "inspect_tool": {"name": (str, False)},
 }
 
 DESCRIPTIONS = {
@@ -51,6 +54,8 @@ DESCRIPTIONS = {
     "schedule_task": "Create persistent systemd task. Schedule: daily HH:MM, hourly, or every N minutes/hours. kind=static with JSON payload {steps:[{tool:registered_tool_name,arguments:{...}}]} composed from fresh system context; kind=ai with natural-language prompt for a fresh plan on every run.",
     "provision_disk": "Format one provably blank whole disk as ext4, mount under /mnt, and persist by UUID in fstab. Requires exact destructive approval. Never use for an existing filesystem or partition.",
     "archive_create": "Create a timestamped 0600 tar.gz of source under an existing destination directory; returns archive path.",
+    "create_tool": "Write or update any Python tool. Source must define run(args) and return a JSON-compatible result. Parameters is a JSON object schema encoded as a string. The tool becomes callable immediately under its chosen name. Generated code uses current OS privileges and requires interactive approval.",
+    "inspect_tool": "List generated tools, or give name to read the source and schema of one tool for improvement.",
 }
 
 ENUMS = {"service_manager": {"action": ["status", "start", "stop", "restart", "reload", "enable", "disable", "is-active", "is-enabled"]},
@@ -64,7 +69,12 @@ ENUMS = {"service_manager": {"action": ["status", "start", "stop", "restart", "r
 
 
 def validate(name: str, args: object) -> dict:
-    if name not in SPECS or not isinstance(args, dict):
+    if name not in SPECS:
+        manifest = custom_tools.get(name)
+        if not manifest:
+            raise Rejected("Unknown tool")
+        return custom_tools.validate_args(manifest["parameters"], args)
+    if not isinstance(args, dict):
         raise Rejected("Unknown tool or invalid arguments")
     spec = SPECS[name]
     if set(args) - set(spec) or any(required and key not in args for key, (_, required) in spec.items()):
@@ -77,9 +87,12 @@ def validate(name: str, args: object) -> dict:
 
 def schemas() -> list[dict]:
     mapping = {str: "string", int: "integer", bool: "boolean"}
-    return [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name], "parameters": {
+    builtins = [{"type": "function", "function": {"name": name, "description": DESCRIPTIONS[name], "parameters": {
         "type": "object", "properties": {key: {"type": mapping[kind], **({"enum": ENUMS[name][key]} if key in ENUMS.get(name, {}) else {})} for key, (kind, _) in spec.items()},
         "required": [key for key, (_, required) in spec.items() if required], "additionalProperties": False}}} for name, spec in SPECS.items()]
+    generated = [{"type": "function", "function": {"name": name, "description": item["description"], "parameters": item["parameters"]}}
+                 for name, item in custom_tools.all_tools().items() if name not in SPECS]
+    return builtins + generated
 
 
 @contextmanager
@@ -153,6 +166,12 @@ def _write(path: Path, content: str, backup: Path | None) -> dict:
 
 def execute(name: str, args: dict, db: Storage, run_id: str, timeout: int = 120) -> dict:
     validate(name, args)
+    if name not in SPECS:
+        return custom_tools.execute(name, args, timeout)
+    if name == "create_tool":
+        return custom_tools.create(args["name"], args["description"], args["parameters"], args["source"], args.get("replace", False), set(SPECS))
+    if name == "inspect_tool":
+        return custom_tools.inspect(args.get("name"))
     if name == "shell_exec":
         cwd = args.get("cwd")
         if cwd is not None and (not Path(cwd).is_absolute() or not Path(cwd).is_dir()):

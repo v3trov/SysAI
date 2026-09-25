@@ -7,6 +7,12 @@ from .runner import run
 
 
 def verify(name: str, args: dict, timeout: int = 30) -> dict:
+    if name == "create_tool":
+        import hashlib
+        from .custom_tools import get
+        manifest = get(args["name"])
+        return {"verified": bool(manifest and manifest["sha256"] == hashlib.sha256(args["source"].encode()).hexdigest()),
+                "detail": "Registered source hash checked"}
     if name in {"write_file", "edit_file"}:
         path = Path(args["path"])
         if not path.is_file():

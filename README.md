@@ -41,15 +41,19 @@ sysai doctor
 sysai history
 ```
 
-The agent may take up to 30 tool steps per request. Read-only tools run automatically. File, package, service, Docker, mount and scheduled-task mutations are separate typed tools. High-risk actions require the exact target-specific phrase at the terminal. `--dry-run` allows live diagnostics and records proposed mutations without executing them. Expert mode never bypasses high-risk confirmation.
+The agent may take up to 30 model steps per request. Diagnostics and ordinary actions run without confirmation. Recognized deletion, formatting and disk destruction require the exact target-specific phrase at the terminal. `--dry-run` allows live diagnostics and records proposed mutations without executing them.
+
+SysAI can write its own Python tools through `create_tool`. It supplies a name, description, JSON parameter schema and Python source defining `run(args)`, then can call the new tool in the same conversation. It can inspect and replace its tools later; they persist in `/var/lib/sysai/tools` for root and survive package updates. There is no fixed catalog of task-specific scripts. Generated tools have the invoking user's OS privileges and run automatically. Their source is displayed in the terminal when registered. They run in separate processes with timeouts, not a security sandbox.
 
 Docker runs support a container name, image, optional TCP port mapping, and an optional named volume. The backend checks that the container is running and that a requested port binding exists.
 
 ## Safety and limits
 
-The shell tool accepts general Linux commands. Simple commands run as argv. Pipelines, redirects and expansion require `shell=true` and explicit approval. The backend classifies known read operations, mutations and destructive actions; unknown commands require review. Tool calls are strictly validated before execution. Output is bounded and redacted before being sent to DeepSeek or stored. Config edits are backed up; native validation is used for nginx and systemd units. SQLite history lives in `/var/lib/sysai` for root or `~/.local/share/sysai` for other users. Resource locks serialize typed mutations.
+The shell tool accepts general Linux commands. Simple commands run as argv. Pipelines, redirects and expansion require `shell=true`. The backend classifies known read operations, mutations and recognized destructive actions. Tool calls are validated before execution. Output is bounded and redacted before being sent to DeepSeek or stored. Config edits are backed up; native validation is used for nginx and systemd units. SQLite history lives in `/var/lib/sysai` for root or `~/.local/share/sysai` for other users. Resource locks serialize typed mutations.
 
-Network and SSH changes can use the general command and file tools with destructive-level approval. They lack automatic timed rollback, so console or out-of-band recovery should be available. The `provision_disk` tool handles only a whole blank disk with no partitions, signatures or mounts: it checks size, requires exact destructive approval, formats ext4, writes a backed-up UUID entry to `fstab`, and verifies the mount. Other storage workflows can use general Linux commands after risk approval. The disk path has unit tests but has not been exercised on a spare physical disk; use a disposable VM before production use.
+Network and SSH changes can use the general command and file tools automatically. They lack automatic timed rollback, so console or out-of-band recovery should be available. The `provision_disk` tool handles only a whole blank disk with no partitions, signatures or mounts: it checks size, requires exact destructive approval, formats ext4, writes a backed-up UUID entry to `fstab`, and verifies the mount. Other storage workflows can use general Linux commands; recognized destructive commands require approval. The disk path has unit tests but has not been exercised on a spare physical disk; use a disposable VM before production use.
+
+**Deletion protection is best effort.** Recognized remove, wipe and formatting commands require confirmation, but arbitrary shell commands and generated Python tools running as root can delete or overwrite data through code the classifier does not recognize. SysAI cannot guarantee that no data is deleted in this unrestricted mode. Keep recoverable backups or snapshots for valuable systems.
 
 ## Scheduled tasks
 

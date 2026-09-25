@@ -10,6 +10,7 @@ from contextlib import redirect_stdout
 
 from sysai.agent import Agent, _parse_response
 from sysai.config import Config
+from sysai.custom_tools import get as get_custom_tool, tool_dir
 from sysai.cli import setup_wizard
 from sysai.context import discover
 from sysai.disks import preflight
@@ -19,7 +20,7 @@ from sysai.runner import run
 from sysai.safety import Rejected, approve, classify, parse_command, protected_path, secret_path
 from sysai.scheduler import parse_schedule, task_run, unit_text, validate_plan
 from sysai.storage import Storage
-from sysai.tools import execute, validate
+from sysai.tools import execute, schemas, validate
 
 
 class CoreTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class CoreTests(unittest.TestCase):
         self.addCleanup(self.db.db.close)
 
     def test_dangerous_commands_require_confirmation(self):
-        for command in ("rm -rf /", "rm -rf /etc", "mkfs.ext4 /dev/sda1", "wipefs -a /dev/sda", "dd if=/dev/zero of=/dev/sda", "iptables -F", "nft flush ruleset", "ip route del default", "ethtool -K eth0 gro off"):
+        for command in ("rm -rf /", "rm -rf /etc", "mkfs.ext4 /dev/sda1", "wipefs -a /dev/sda", "dd if=/dev/zero of=/dev/sda", "iptables -F", "nft flush ruleset", "ip route del default"):
             with self.subTest(command=command):
                 decision = classify("shell_exec", {"command": command})
                 self.assertEqual(decision.level, 3)
@@ -45,12 +46,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(parse_command("ip route"), ["ip", "route"])
         self.assertEqual(classify("shell_exec", {"command": "df -h"}).level, 0)
         self.assertEqual(classify("shell_exec", {"command": "custom-admin-command --check"}).level, 2)
-        self.assertEqual(classify("service_manager", {"action": "restart", "service": "sshd.service"}).level, 3)
+        self.assertEqual(classify("service_manager", {"action": "restart", "service": "sshd.service"}).level, 2)
         self.assertEqual(classify("package_manager", {"action": "install", "package": "htop"}).level, 1)
-        self.assertEqual(classify("package_manager", {"action": "install", "package": "openssh-server"}).level, 3)
+        self.assertEqual(classify("package_manager", {"action": "install", "package": "openssh-server"}).level, 2)
         disk = classify("provision_disk", {"device": "/dev/sdb", "expected_size_gb": 500, "target": "/mnt/storage"})
         self.assertEqual(disk.level, 3)
         self.assertFalse(approve(disk, dry_run=False, interactive=False))
+        for command in ("nft list ruleset", "python3 -V", "tracepath example.com"):
+            self.assertEqual(classify("shell_exec", {"command": command}).level, 0)
+        self.assertEqual(classify("shell_exec", {"command": "python3 /tmp/check_ui.py"}).level, 2)
+        self.assertEqual(classify("shell_exec", {"command": "rm /tmp/some-file"}).level, 3)
+        self.assertEqual(classify("docker", {"action": "remove", "name": "some-container"}).level, 3)
+        self.assertEqual(classify("package_manager", {"action": "remove", "package": "htop"}).level, 3)
+        with patch("builtins.input", side_effect=AssertionError("No approval prompt expected")):
+            self.assertTrue(approve(classify("shell_exec", {"command": "python3 /tmp/check_ui.py"}), dry_run=False, interactive=True))
 
     def test_protected(self):
         for path in ("/", "/etc", "/boot", "/root"):
@@ -238,6 +247,52 @@ class CoreTests(unittest.TestCase):
             result = agent.ask("Прочитай файл")
         self.assertEqual(result.status, "success")
         self.assertIn("Файл недоступен", result.message)
+
+    def test_missing_file_is_returned_to_model(self):
+        calls = [{"id": "missing", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"/tmp/sysai-nonexistent-test-file"}'}}]
+        agent = Agent(MockLLMProvider([{"tool_calls": calls}, {"content": "Файла нет; продолжаю проверку другим способом."}]), Config(), self.db, interactive=False)
+        result = agent.ask("Проверь файл")
+        self.assertEqual(result.status, "success")
+        self.assertIn("Файла нет", result.message)
+
+    def test_agent_creates_and_uses_new_python_tool(self):
+        parameters = json.dumps({"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                                 "required": ["a", "b"], "additionalProperties": False})
+        source = "def run(args):\n    return {'sum': args['a'] + args['b']}\n"
+        create_args = {"name": "add_numbers", "description": "Add two integers", "parameters": parameters, "source": source}
+        calls = [
+            {"tool_calls": [{"id": "create", "type": "function", "function": {"name": "create_tool", "arguments": json.dumps(create_args)}}]},
+            {"tool_calls": [{"id": "use", "type": "function", "function": {"name": "add_numbers", "arguments": '{"a":2,"b":3}'}}]},
+            {"tool_calls": [{"id": "check", "type": "function", "function": {"name": "system_info", "arguments": "{}"}}]},
+            {"content": "Сумма равна 5."},
+        ]
+
+        class RecordingProvider(MockLLMProvider):
+            def complete(self, messages, tools):
+                self.available.append({tool["function"]["name"] for tool in tools})
+                return super().complete(messages, tools)
+
+        provider = RecordingProvider(calls)
+        provider.available = []
+        agent = Agent(provider, Config(), self.db, interactive=True)
+        with patch("sysai.agent.approve", return_value=True), patch("sysai.agent.discover", return_value={}), \
+             patch("sysai.agent.execute", wraps=execute) as executor, redirect_stdout(io.StringIO()):
+            result = agent.ask("Создай инструмент сложения и используй")
+        self.assertEqual(result.status, "success", result.message)
+        self.assertNotIn("add_numbers", provider.available[0])
+        self.assertIn("add_numbers", provider.available[1])
+        self.assertEqual(executor.call_count, 3)
+        self.assertEqual(classify("add_numbers", {"a": 2, "b": 3}).level, 2)
+        with self.assertRaises(Rejected):
+            validate("add_numbers", {"a": 2, "b": "3"})
+        self.assertIn("add_numbers", {tool["function"]["name"] for tool in schemas()})
+        self.assertIn("sum", execute("add_numbers", {"a": 2, "b": 3}, self.db, "test")["result"])
+        upgraded = dict(create_args, source="def run(args):\n    return {'sum': 2 * (args['a'] + args['b'])}\n", replace=True)
+        self.assertTrue(execute("create_tool", upgraded, self.db, "test")["replaced"])
+        self.assertEqual(execute("add_numbers", {"a": 2, "b": 3}, self.db, "test")["result"]["sum"], 10)
+        version = get_custom_tool("add_numbers")
+        (tool_dir() / version["file"]).write_text("def run(args):\n    return {'sum': 999}\n")
+        self.assertNotIn("add_numbers", {tool["function"]["name"] for tool in schemas()})
 
     def test_dry_run_does_not_mutate(self):
         file = Path(self.temp.name) / "planned.txt"
